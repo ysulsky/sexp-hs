@@ -7,12 +7,15 @@
 
 module Sexp (
   Sexp(..),
+  SexpError(..),
   SexpResult(..),
   ToSexp(..),
   OfSexp(..),
-  Generic
+  Generic,
+  read_result
 ) where
 
+import Control.Monad.Error
 import Data.Char as Char
 import Data.List( (\\) )
 import Data.Either( partitionEithers )
@@ -94,26 +97,24 @@ class ToSexp a where
   to_sexp = head . generic_to_sexp . from
 
 
-data SexpResult a =
-    Error Sexp String
-  | Success a deriving (Show, Eq)
+data SexpError = E Sexp String
+type SexpResult = Either SexpError
 
-instance Functor SexpResult where
-  fmap f (Error m s) = Error m s
-  fmap f (Success x) = Success (f x)
+instance Error SexpError where
+  strMsg = E (Atom "<no sexp>")
 
-instance Monad SexpResult where
-  (Error m s) >>= f = Error m s
-  (Success a) >>= f = f a
-  return = Success
-  fail   = Error (Atom "<sexp not supplied>")
+instance Show SexpError where
+  showsPrec p (E sexp msg) =
+    showParen (p > 10) $ shows sexp . showString (": " ++ msg)
+
+sexp_error sexp msg = throwError $ E sexp msg
 
 data Arguments x = NotLabeled Int | Labeled [String] deriving Show
 
-combineArguments :: Arguments a -> Arguments b -> Arguments c
-combineArguments  (NotLabeled a) (NotLabeled b) = NotLabeled (a +  b)
-combineArguments  (Labeled    a) (Labeled    b) = Labeled    (a ++ b)
-combineArguments _ _ = error "combineArguments"
+combine_arguments :: Arguments a -> Arguments b -> Arguments c
+combine_arguments  (NotLabeled a) (NotLabeled b) = NotLabeled (a +  b)
+combine_arguments  (Labeled    a) (Labeled    b) = Labeled    (a ++ b)
+combine_arguments _ _ = error "combine_arguments"
 
 class ArgumentCount f where
   arguments :: Arguments (f p)
@@ -122,7 +123,7 @@ instance ArgumentCount U1 where
   arguments = NotLabeled 0
 
 instance (ArgumentCount a, ArgumentCount b) => ArgumentCount (a :*: b) where
-  arguments = combineArguments a b :: Arguments ((a :*: b) p)
+  arguments = combine_arguments a b :: Arguments ((a :*: b) p)
     where a = arguments :: Arguments (a p)
           b = arguments :: Arguments (b p)
 
@@ -138,7 +139,7 @@ class GenericOfSexp f where
   generic_of_sexp :: Sexp -> SexpResult (f p)
 
 instance GenericOfSexp U1 where
-  generic_of_sexp _ = Success U1
+  generic_of_sexp _ = return U1
 
 instance (Datatype c, GenericOfSexp a) => GenericOfSexp (M1 D c a) where
   generic_of_sexp sexp    = fmap M1 $ generic_of_sexp sexp
@@ -156,19 +157,19 @@ instance (Constructor c, ArgumentCount a, GenericOfSexp a) => GenericOfSexp (M1 
         (map Char.toLower $ conName m1) == (map Char.toLower c)
       match_constructor_and_get_args =
         case sexp of
-          Atom c               | constructor_matches c -> Success []
-          List (Atom c : args) | constructor_matches c -> Success args
-          Atom _               | otherwise -> Error sexp $ "expected " ++ conName m1
-          List (Atom c : _)    | otherwise -> Error sexp $ "expected " ++ conName m1
-          List _ -> Error sexp "expected a constructor"
+          Atom c               | constructor_matches c -> return []
+          List (Atom c : args) | constructor_matches c -> return args
+          Atom _               | otherwise -> sexp_error sexp $ "expected " ++ conName m1
+          List (Atom c : _)    | otherwise -> sexp_error sexp $ "expected " ++ conName m1
+          List _ -> sexp_error sexp "expected a constructor"
       order_args input_args =
         case arguments :: Arguments (a p) of
-          NotLabeled n | length input_args == n -> Success input_args
-          NotLabeled n | otherwise -> Error sexp ("expected "++show n++" arguments")
+          NotLabeled n | length input_args == n -> return input_args
+          NotLabeled n | otherwise -> sexp_error sexp $ "expected "++show n++" arguments"
           Labeled labels ->
             let
-              parse_field (List [Atom field, value]) = Success (field, value)
-              parse_field sexp = Error sexp "not a record field"
+              parse_field (List [Atom field, value]) = return (field, value)
+              parse_field sexp = sexp_error sexp "not a record field"
               error_message inputs =
                 if null missing then "extra fields: " ++ show extra
                 else "missing fields: " ++ show missing
@@ -177,20 +178,20 @@ instance (Constructor c, ArgumentCount a, GenericOfSexp a) => GenericOfSexp (M1 
                       extra   = inputs \\ labels
             in
             do input_args' <- mapM parse_field input_args
-               let error = Error sexp (error_message $ map fst input_args') in
+               let error = sexp_error sexp (error_message $ map fst input_args') in
                  if length input_args' /= length labels then
                    error
                  else
-                   maybe error Success $ mapM (flip lookup input_args') labels
+                   maybe error return $ mapM (flip lookup input_args') labels
 
 instance (GenericOfSexp a, GenericOfSexp b) => GenericOfSexp (a :+: b) where
   generic_of_sexp sexp =
     case left of
-      Success x -> Success (L1 x)
-      Error _ m ->
+      Right x -> return $ L1 x
+      Left (E _ m) ->
         case right of
-          Success x  -> Success (R1 x)
-          Error _ m' -> Error sexp (m ++ " or " ++ m')
+          Right x -> return $ R1 x
+          Left (E _ m') -> sexp_error sexp (m ++ " or " ++ m')
     where
       left   = generic_of_sexp sexp
       right  = generic_of_sexp sexp
@@ -215,7 +216,7 @@ class OfSexp a where
   of_sexp :: Sexp -> SexpResult a
   list_of_sexp :: Sexp -> SexpResult [a]
   list_of_sexp (List sexps)  = mapM of_sexp sexps
-  list_of_sexp sexp@(Atom _) = Error sexp "expected a list"
+  list_of_sexp sexp@(Atom _) = sexp_error sexp "expected a list"
 
   default of_sexp :: (Generic a, GenericOfSexp (Rep a)) => Sexp -> SexpResult a
   of_sexp sexp = fmap to $ generic_of_sexp sexp
@@ -223,33 +224,35 @@ class OfSexp a where
 instance ToSexp () where
   to_sexp () = List []
 instance OfSexp () where
-  of_sexp (List []) = Success ()
-  of_sexp sexp      = Error sexp "expected a Unit value"
+  of_sexp (List []) = return ()
+  of_sexp sexp      = sexp_error sexp "expected a Unit value"
 
 instance ToSexp a => ToSexp (Maybe a) where
   to_sexp Nothing  = List []
   to_sexp (Just x) = List [to_sexp x]
 instance OfSexp a => OfSexp (Maybe a) where
-  of_sexp (List [])  = Success Nothing
+  of_sexp (List [])  = return Nothing
   of_sexp (List [x]) = fmap Just $ of_sexp x
-  of_sexp sexp       = Error sexp "expected a Maybe value"
+  of_sexp sexp       = sexp_error sexp "expected a Maybe value"
 
 instance ToSexp Char where
   to_sexp c = Atom ([c])
   list_to_sexp s = Atom s
 instance OfSexp Char where
-  of_sexp (Atom [c]) = Success c
-  of_sexp sexp@(List _) = Error sexp "expected an atom"
-  list_of_sexp (Atom s)      = Success s
-  list_of_sexp sexp@(List _) = Error sexp "expected an atom"
+  of_sexp (Atom [c]) = return c
+  of_sexp sexp@(List _) = sexp_error sexp "expected an atom"
+  list_of_sexp (Atom s)      = return s
+  list_of_sexp sexp@(List _) = sexp_error sexp "expected an atom"
 
 instance ToSexp a => ToSexp [a] where
   to_sexp = list_to_sexp
 instance OfSexp a => OfSexp [a] where
   of_sexp = list_of_sexp
 
-tuple_of_sexp_error _ sexp@(Atom _) = Error sexp "expected a list"
-tuple_of_sexp_error n sexp@(List _) = Error sexp $ "expected "++show n++" elements"
+tuple_of_sexp_error _ sexp@(Atom _) =
+  sexp_error sexp "expected a list"
+tuple_of_sexp_error n sexp@(List _) =
+  sexp_error sexp ("expected "++show n++" elements")
 
 instance (ToSexp a, ToSexp b) => ToSexp (a, b) where
   to_sexp (a, b) = List [to_sexp a, to_sexp b]
@@ -290,7 +293,6 @@ instance OfSexp Ordering
 instance (ToSexp a, ToSexp b) => ToSexp (Either a b)
 instance (OfSexp a, OfSexp b) => OfSexp (Either a b)
 
-
 -- I can't do this:
 -- class Show a => ToSexpWithShow a
 -- instance ToSexpWithShow a => ToSexp a where
@@ -306,14 +308,17 @@ instance (OfSexp a, OfSexp b) => OfSexp (Either a b)
 
 to_sexp_show x = Atom $ show x
 
-of_sexp_read sexp@(Atom x) =
-  let parses = map fst . filter (null . snd) $ reads x in
+read_result s =
+  let parses = map fst . filter (null . snd) $ reads s in
   case parses of
-    [x] -> Success x
-    []  -> Error sexp "no parse"
-    _   -> Error sexp "ambiguous parse"
+    [x] -> Right x
+    []  -> Left  "no parse"
+    _   -> Left  "ambiguous parse"
+
+of_sexp_read sexp@(Atom s) =
+  either (sexp_error sexp) Right $ read_result s
 of_sexp_read sexp@(List _) =
-  Error sexp "expected an atom"
+  sexp_error sexp "expected an atom"
 
 instance ToSexp Int where
   to_sexp = to_sexp_show
@@ -333,26 +338,3 @@ instance OfSexp Float where
 instance OfSexp Double where
   of_sexp = of_sexp_read
 
-{- -- examples
-
-data Foo = A | B deriving (Show, Generic)
-instance OfSexp Foo
-instance ToSexp Foo
-
-data Bar = C String | D Foo Foo deriving (Show, Generic)
-instance OfSexp Bar
-instance ToSexp Bar
-
-data Baz = Z { field :: String } | Y { field :: String, yyy :: Baz } deriving (Show, Generic)
-instance OfSexp Baz
-instance ToSexp Baz
-
-data Goo = G1 Goo | G2 deriving (Show, Generic)
-instance OfSexp Goo
-instance ToSexp Goo
-
-data Alist a b = Alist [(a, b)]  deriving (Show, Generic)
-instance (OfSexp a, OfSexp b) => OfSexp (Alist a b)
-instance (ToSexp a, ToSexp b) => ToSexp (Alist a b)
-
--}
