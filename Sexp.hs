@@ -32,10 +32,9 @@ sexp_symbol_char  c  = not (Char.isSpace c)
 
 instance Show Sexp where
   showsPrec _ (Atom x) s  =
-    if all (\c -> Char.isPrint c && sexp_symbol_char c) x then
-      x ++ s
-    else
-      shows x s
+    if all (\c -> Char.isPrint c && sexp_symbol_char c) x
+    then x ++ s
+    else shows x s
   showsPrec _ (List []) s = "()" ++ s
   showsPrec _ (List (x:xs)) s = "(" ++ shows x (show_rest xs (")" ++ s))
     where show_rest []     s = s
@@ -171,7 +170,8 @@ instance (Constructor c, ArgumentCount a, GenericOfSexp a) => GenericOfSexp (M1 
               parse_field (List [Atom field, value]) = return (field, value)
               parse_field sexp = sexp_error sexp "not a record field"
               error_message inputs =
-                if null missing then "extra fields: " ++ show extra
+                if null missing
+                then "extra fields: "   ++ show extra
                 else "missing fields: " ++ show missing
                      ++ if null extra then "" else "; extra fields: " ++ show extra
                 where missing = labels \\ inputs
@@ -179,10 +179,9 @@ instance (Constructor c, ArgumentCount a, GenericOfSexp a) => GenericOfSexp (M1 
             in
             do input_args' <- mapM parse_field input_args
                let error = sexp_error sexp (error_message $ map fst input_args') in
-                 if length input_args' /= length labels then
-                   error
-                 else
-                   maybe error return $ mapM (flip lookup input_args') labels
+                 if length input_args' /= length labels
+                 then error
+                 else maybe error return $ mapM (flip lookup input_args') labels
 
 instance (GenericOfSexp a, GenericOfSexp b) => GenericOfSexp (a :+: b) where
   generic_of_sexp sexp =
