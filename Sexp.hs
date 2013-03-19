@@ -16,9 +16,10 @@ module Sexp (
 ) where
 
 import Control.Monad.Error
-import Data.Char as Char
+import qualified Data.Char as Char
 import Data.List( (\\) )
 import Data.Either( partitionEithers )
+import Text.ParserCombinators.ReadP
 import GHC.Generics
 
 data Sexp =
@@ -28,7 +29,21 @@ data Sexp =
 
 sexp_symbol_char '(' = False
 sexp_symbol_char ')' = False
+sexp_symbol_char '"' = False
 sexp_symbol_char  c  = not (Char.isSpace c)
+
+parser  = skipSpaces >> parser'
+  where parser'  = do
+          p <- atom +++ between (char '(') (char ')') sexps
+          skipSpaces
+          return p
+        sexps    = fmap List $ skipSpaces >> many parser'
+        atom     = fmap Atom $ unquoted +++ quoted
+        unquoted = munch1 sexp_symbol_char
+        quoted   = do '"' <- get; readS_to_P ((reads . ('"' :)))
+
+instance Read Sexp where
+  readsPrec = const $ readP_to_S parser
 
 instance Show Sexp where
   showsPrec _ (Atom x) s  =
@@ -39,20 +54,6 @@ instance Show Sexp where
   showsPrec _ (List (x:xs)) s = "(" ++ shows x (show_rest xs (")" ++ s))
     where show_rest []     s = s
           show_rest (x:xs) s = " " ++ shows x (show_rest xs s)
-
-instance Read Sexp where
-   readsPrec _ ""        = []
-   readsPrec _ ( c : cs) | Char.isSpace c = reads cs
-   readsPrec _ (')': _ ) = []
-   readsPrec _ ('(':')': cs) = [(List [], cs)]
-   readsPrec _ ('(':     cs) = do
-     (next,      rest)  <- reads cs
-     (List rest, rest') <- reads ('(' : rest)
-     return (List (next : rest), rest')
-   readsPrec _ s@('"': _ ) = map (\(s, rest) -> (Atom s, rest)) $ reads s
-   readsPrec _ s =
-     let (atom, rest) = span sexp_symbol_char s in
-     [(Atom atom, rest)]
 
 class GenericToSexp f where
   generic_to_sexp :: f p -> [Sexp]
