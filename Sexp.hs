@@ -30,17 +30,25 @@ data Sexp =
 sexp_symbol_char '(' = False
 sexp_symbol_char ')' = False
 sexp_symbol_char '"' = False
+sexp_symbol_char ';' = False
 sexp_symbol_char  c  = not (Char.isSpace c)
 
-parser  = skipSpaces >> parser'
-  where parser'  = do
-          p <- atom +++ between (char '(') (char ')') sexps
-          skipSpaces
-          return p
-        sexps    = fmap List $ skipSpaces >> many parser'
-        atom     = fmap Atom $ unquoted +++ quoted
-        unquoted = munch1 sexp_symbol_char
-        quoted   = do '"' <- get; readS_to_P ((reads . ('"' :)))
+parser :: ReadP Sexp
+parser = skip_junk >> skip_junk_after sexp
+  where sexp  = atom +++ between (char '(') (char ')') sexps
+        sexps = fmap List $ skip_junk >> many (skip_junk_after sexp)
+        atom  = fmap Atom $ unquoted +++ quoted
+        quoted   = char '"' >> readS_to_P ((reads . ('"' :)))
+        unquoted = look >>= \s ->
+          case s of
+            '#':';':_ -> pfail -- block comment
+            _         -> munch1 sexp_symbol_char
+        eol      = eof +++ (char '\n' >> return ())
+        line_comment  = between (char ';') eol (skipMany get)
+        block_comment = char '#' >> char ';' >> skip_junk >> sexp >> return ()
+        comment  = line_comment +++ block_comment
+        skip_junk = skipSpaces >> many (comment >> skipSpaces)
+        skip_junk_after p = p >>= \p -> skip_junk >> return p
 
 instance Read Sexp where
   readsPrec = const $ readP_to_S parser
